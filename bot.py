@@ -1,3 +1,4 @@
+import shutil
 import asyncio
 import os
 from pathlib import Path
@@ -22,7 +23,25 @@ dp = Dispatcher()
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-COOKIE_PATH = "/etc/secrets/cookies.txt" if os.getenv("RENDER") else "cookies.txt"
+COOKIE_PATH = None
+
+if os.getenv("RENDER"):
+    SECRET_PATH = "/etc/secrets/cookies.txt"
+    RUNTIME_PATH = "/tmp/cookies.txt"
+
+    if os.path.exists(SECRET_PATH):
+        shutil.copy(SECRET_PATH, RUNTIME_PATH)
+        COOKIE_PATH = RUNTIME_PATH
+        print("Render 쿠키 → /tmp 복사 완료")
+    else:
+        print("Render Secret cookies.txt 없음")
+
+else:
+    if os.path.exists("cookies.txt"):
+        COOKIE_PATH = "cookies.txt"
+        print("로컬 쿠키 사용")
+    else:
+        print("로컬 cookies.txt 없음")
 
 if not os.path.exists(COOKIE_PATH):
     print(f"[쿠키 경고] {COOKIE_PATH} 없음 → 로그인 없이 시도")
@@ -46,12 +65,13 @@ async def handler(message: Message):
             f.unlink(missing_ok=True)
 
         ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best',
+            # 'format': 'bestvideo[height<=720]+bestaudio/best',
+            'format': 'best[ext=mp4]',
             'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
             'merge_output_format': 'mp4',
-            'cookiefile': COOKIE_PATH,
+            'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -65,32 +85,32 @@ async def handler(message: Message):
         # faststart 적용 (모바일 재생 최적화)
         final_file = DOWNLOAD_DIR / f"fs_{info.get('id')}.mp4"
 
+
         cmd = [
             'ffmpeg', '-y',
             '-i', str(merged_file),
             '-c', 'copy',
+            '-map', '0',
             '-movflags', '+faststart',
             str(final_file)
         ]
+ 
 
         subprocess.run(cmd, check=True)
+
 
         # 1. 미리보기: video로 전송 (빠른 확인용)
         await message.answer_video(
             FSInputFile(final_file),
-            caption="Preview (Telegram Player)\n\nDownload in original aspect ratio → Click the button below 🐿️",
+            caption="Download completed 🎬\n (Telegram Player)",
             supports_streaming=True
         )
 
-        # 2. 원본 비율 보장: document로 전송 (선택지 제공)
-        await message.answer_document(
-            FSInputFile(final_file),
-            caption="Original file (download)\nLink: " + url[:120]
-        )
 
         # 정리
         merged_file.unlink(missing_ok=True)
         final_file.unlink(missing_ok=True)
+   
 
     except Exception as e:
         await message.answer(f"오류: {str(e)}")
