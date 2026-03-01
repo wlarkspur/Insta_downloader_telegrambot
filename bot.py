@@ -1,3 +1,5 @@
+import shutil
+
 import asyncio
 import os
 import subprocess
@@ -23,15 +25,28 @@ dp = Dispatcher()
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-# 쿠키 파일 경로 자동 선택 (로컬 vs Render)
-if os.getenv("RENDER"):
-    COOKIE_PATH = "/etc/secrets/cookies.txt"
-else:
-    COOKIE_PATH = "cookies.txt"
+# ====================== 쿠키 설정 (Render 안전 버전) ======================
 
-if not os.path.exists(COOKIE_PATH):
-    print(f"[WARNING] 쿠키 파일 없음: {COOKIE_PATH}")
-    print("로컬 → cookies.txt 파일 확인 / Render → Secret Files 업로드 확인")
+COOKIE_PATH = None
+
+if os.getenv("RENDER"):
+    SECRET_COOKIE_PATH = "/etc/secrets/cookies.txt"
+    RUNTIME_COOKIE_PATH = "/tmp/cookies.txt"
+
+    if os.path.exists(SECRET_COOKIE_PATH):
+        shutil.copy(SECRET_COOKIE_PATH, RUNTIME_COOKIE_PATH)
+        COOKIE_PATH = RUNTIME_COOKIE_PATH
+        print("[INFO] Render 쿠키 복사 완료 → /tmp 사용")
+    else:
+        print("[WARNING] Render Secret cookies.txt 없음")
+
+else:
+    LOCAL_COOKIE_PATH = "cookies.txt"
+    if os.path.exists(LOCAL_COOKIE_PATH):
+        COOKIE_PATH = LOCAL_COOKIE_PATH
+        print("[INFO] 로컬 쿠키 사용")
+    else:
+        print("[WARNING] 로컬 cookies.txt 없음")
 
 # ====================== 핸들러 ======================
 @dp.message(CommandStart())
@@ -63,7 +78,7 @@ async def download_handler(message: Message):
             'retries': 20,
             'fragment_retries': 20,
             'merge_output_format': 'mp4',
-            'cookiefile': COOKIE_PATH,
+            'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -93,6 +108,7 @@ async def download_handler(message: Message):
             '-level', '3.0',
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',     # 핵심! 모바일 재생 고정 문제 해결
+            '-vf', 'scale=720:-2',
             '-crf', '23',
             '-preset', 'medium',
             '-c:a', 'aac',
