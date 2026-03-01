@@ -67,7 +67,7 @@ async def handler(message: Message):
             f.unlink(missing_ok=True)
 
         ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best',  # 720p 제한 (메모리 절약 + 호환성 ↑)
+            'format': 'bestvideo[height<=480]+bestaudio/best',  # 480p 제한 (메모리 절약 + 호환성 ↑)
             'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
