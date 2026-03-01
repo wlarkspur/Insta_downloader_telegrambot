@@ -69,7 +69,7 @@ async def download_handler(message: Message):
 
     try:
         ydl_opts = {
-            'format': 'bv*+ba/b',
+            'format': 'bestvideo[height<=720]+bestaudio/best',
             'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
             'noplaylist': True,
             'quiet': False,
@@ -79,6 +79,7 @@ async def download_handler(message: Message):
             'fragment_retries': 20,
             'merge_output_format': 'mp4',
             'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
+            'ratelimit': '500k',  # 다운로드 속도 제한 → 메모리 버퍼 줄임
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -108,7 +109,7 @@ async def download_handler(message: Message):
             '-level', '3.0',
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',     # 핵심! 모바일 재생 고정 문제 해결
-            '-vf', 'scale=720:-2',
+            '-vf', 'scale=480:-2',
             '-crf', '23',
             '-preset', 'medium',
             '-c:a', 'aac',
