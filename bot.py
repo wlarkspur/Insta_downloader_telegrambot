@@ -1,8 +1,5 @@
-import shutil
-
 import asyncio
 import os
-import subprocess
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,13 +8,13 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile
 
 import yt_dlp
+import subprocess
 
-# ====================== 설정 ======================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN이 .env 또는 환경변수에 없습니다.")
+    raise ValueError("BOT_TOKEN 없음")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -25,136 +22,79 @@ dp = Dispatcher()
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-# ====================== 쿠키 설정 (Render 안전 버전) ======================
+COOKIE_PATH = "/etc/secrets/cookies.txt" if os.getenv("RENDER") else "cookies.txt"
 
-COOKIE_PATH = None
+if not os.path.exists(COOKIE_PATH):
+    print(f"[쿠키 경고] {COOKIE_PATH} 없음 → 로그인 없이 시도")
 
-if os.getenv("RENDER"):
-    SECRET_COOKIE_PATH = "/etc/secrets/cookies.txt"
-    RUNTIME_COOKIE_PATH = "/tmp/cookies.txt"
-
-    if os.path.exists(SECRET_COOKIE_PATH):
-        shutil.copy(SECRET_COOKIE_PATH, RUNTIME_COOKIE_PATH)
-        COOKIE_PATH = RUNTIME_COOKIE_PATH
-        print("[INFO] Render 쿠키 복사 완료 → /tmp 사용")
-    else:
-        print("[WARNING] Render Secret cookies.txt 없음")
-
-else:
-    LOCAL_COOKIE_PATH = "cookies.txt"
-    if os.path.exists(LOCAL_COOKIE_PATH):
-        COOKIE_PATH = LOCAL_COOKIE_PATH
-        print("[INFO] 로컬 쿠키 사용")
-    else:
-        print("[WARNING] 로컬 cookies.txt 없음")
-
-# ====================== 핸들러 ======================
 @dp.message(CommandStart())
-async def start_handler(message: Message):
-    await message.answer(
-        "인스타 릴스/비디오 다운로더 봇 📹\n"
-        "공개 링크 보내주세요 → MP4 전송합니다\n"
-        "※ 쿠키는 로컬 cookies.txt 또는 Render Secret Files 사용"
-    )
-
+async def start(message: Message):
+    await message.answer("릴스 링크 보내주세요 📹")
 
 @dp.message()
-async def download_handler(message: Message):
+async def handler(message: Message):
     url = message.text.strip()
     if "instagram.com" not in url:
-        await message.answer("인스타그램 링크만 가능합니다.")
+        await message.answer("인스타 링크만 가능")
         return
 
-    await message.answer("다운로드 중... (모바일 호환 재인코딩 포함) ⏳")
+    await message.answer("다운로드 중...")
 
     try:
+        # 폴더 정리 (메모리 + 디스크 절약)
+        for f in DOWNLOAD_DIR.iterdir():
+            f.unlink(missing_ok=True)
+
         ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best',
+            'format': 'bestvideo[height<=480]+bestaudio/best',  # 480p 제한 (메모리 절약 + 호환성 ↑)
             'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
             'noplaylist': True,
-            'quiet': False,
-            'no_warnings': True,
-            'continuedl': True,
-            'retries': 20,
-            'fragment_retries': 20,
+            'quiet': True,
             'merge_output_format': 'mp4',
-            'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
-            'ratelimit': '500k',  # 다운로드 속도 제한 → 메모리 버퍼 줄임
+            'cookiefile': COOKIE_PATH,
+            
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
-        # yt-dlp가 병합한 mp4 파일 찾기
-        merged_file = None
-        for f in DOWNLOAD_DIR.iterdir():
-            if info.get('id') in f.name and f.suffix.lower() == '.mp4':
-                merged_file = f
-                break
-
-        if not merged_file or not merged_file.exists():
-            await message.answer("병합된 파일을 찾지 못했습니다.")
+        merged_file = DOWNLOAD_DIR / f"{info.get('id')}.mp4"
+        if not merged_file.exists():
+            await message.answer("파일 생성 실패")
             return
 
-        print(f"[DEBUG] 병합 파일 발견: {merged_file}")
-
-        # 모바일 호환 최적화 재인코딩 (원본 비율 유지)
-        output_file = DOWNLOAD_DIR / f"mobile_{info.get('id')}.mp4"
+        final_file = DOWNLOAD_DIR / f"fs_{info.get('id')}.mp4"
 
         cmd = [
             'ffmpeg', '-y',
             '-i', str(merged_file),
-            '-c:v', 'libx264',
-            '-profile:v', 'baseline',      # 모바일 호환 최고 프로파일
-            '-level', '3.0',
-            '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart',     # 핵심! 모바일 재생 고정 문제 해결
-            '-vf', 'scale=480:-2',
-            '-crf', '23',
-            '-preset', 'medium',
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-ac', '2',
-            str(output_file)
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            str(final_file)
         ]
 
-        print("[DEBUG] ffmpeg cmd:", " ".join(cmd))
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        print(f"[DEBUG] ffmpeg returncode: {result.returncode}")
         if result.returncode != 0:
-            print(f"[DEBUG] ffmpeg stderr: {result.stderr}")
-            await message.answer(f"재인코딩 실패:\n{result.stderr[:400]}...")
-            return
-
-        file_size_mb = output_file.stat().st_size / (1024 * 1024)
-        if file_size_mb > 50:
-            await message.answer(f"파일 크기 초과 ({file_size_mb:.1f} MB)")
-            output_file.unlink(missing_ok=True)
-            return
+            await message.answer("faststart 실패 - 원본 전송")
+            final_file = merged_file
 
         await message.answer_video(
-            FSInputFile(output_file),
-            caption=f"완료! (모바일 최적화) 🎉\n{url[:120]}...",
+            FSInputFile(final_file),
+            caption="완료 🎉",
             supports_streaming=True
         )
 
-        # 정리
         merged_file.unlink(missing_ok=True)
-        output_file.unlink(missing_ok=True)
+        final_file.unlink(missing_ok=True)
 
-    except yt_dlp.utils.DownloadError as e:
-        await message.answer(f"다운로드 실패:\n{str(e)}")
     except Exception as e:
-        await message.answer(f"오류:\n{str(e)}")
+        await message.answer(f"오류: {str(e)}")
 
 
-# ====================== 실행 ======================
 async def main():
-    print("봇 시작됨")
+    print("봇 시작")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
