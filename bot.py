@@ -215,7 +215,12 @@ async def download_and_send(
 
         else:
             ydl_opts = {
-                "format": "bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best",
+                "format": (
+                    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
+                    "/bestvideo[height<=720]+bestaudio"
+                    "/18"   # 360p 통합 포맷 (fallback)
+                    "/best"
+                ),
                 "outtmpl":             str(user_dir / "%(id)s.%(ext)s"),
                 "noplaylist":          True,
                 "quiet":               True,
