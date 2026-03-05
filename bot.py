@@ -188,12 +188,8 @@ async def download_and_send(
             }
         else:
             ydl_opts = {
-                "format": (
-                    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-                    "/bestvideo[height<=720]+bestaudio"
-                    "/best[height<=720]"
-                    "/best"
-                ),
+                "format": "best",
+                "format_sort": ["res:720", "ext:mp4:m4a"],
                 "outtmpl":             str(user_dir / "%(id)s.%(ext)s"),
                 "noplaylist":          True,
                 "quiet":               True,
