@@ -30,6 +30,9 @@ PENDING_TTL  = 300         # pending URL 만료 시간 (초)
 # ── 쿠키 설정 ────────────────────────────────────────────────
 COOKIE_PATH: str | None = None
 
+# bot.py 기준 절대경로로 쿠키 탐색
+_BASE_DIR = Path(__file__).parent
+
 if os.getenv("RENDER"):
     SECRET_PATH  = "/etc/secrets/cookies.txt"
     RUNTIME_PATH = "/tmp/cookies.txt"
@@ -40,15 +43,18 @@ if os.getenv("RENDER"):
     else:
         print("Render Secret cookies.txt 없음")
 else:
-    if os.path.exists("cookies.txt"):
-        COOKIE_PATH = "cookies.txt"
-        print("로컬 쿠키 사용")
+    _local = _BASE_DIR / "cookies.txt"
+    if _local.exists():
+        COOKIE_PATH = str(_local.resolve())
+        print(f"로컬 쿠키 사용: {COOKIE_PATH}")
     else:
-        print("로컬 cookies.txt 없음")
+        print(f"로컬 cookies.txt 없음 (탐색 경로: {_local})")
 
 if COOKIE_PATH and not os.path.exists(COOKIE_PATH):
     print(f"[쿠키 경고] {COOKIE_PATH} 없음 → 로그인 없이 시도")
     COOKIE_PATH = None
+
+print(f"[쿠키 최종] COOKIE_PATH = {COOKIE_PATH}")
 
 # ── URL 분류 ─────────────────────────────────────────────────
 def classify_url(url: str) -> str | None:
@@ -195,6 +201,11 @@ async def download_and_send(
                 "quiet":               True,
                 "merge_output_format": "mp4",
                 "cookiefile":          COOKIE_PATH,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "web"],
+                    }
+                },
             }
 
         # ── 비동기로 yt-dlp 실행 ─────────────────────────────
