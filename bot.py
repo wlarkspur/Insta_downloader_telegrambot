@@ -1,6 +1,7 @@
 import shutil
 import asyncio
 import os
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -10,7 +11,6 @@ from aiogram.types import Message, FSInputFile, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import yt_dlp
-import subprocess
 
 load_dotenv()
 
@@ -19,16 +19,19 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN 없음")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp  = Dispatcher()
 
-DOWNLOAD_DIR = Path(__file__).parent / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+BASE_DOWNLOAD_DIR = Path(__file__).parent / "downloads"
+BASE_DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+MAX_FILE_MB  = 50          # 텔레그램 봇 업로드 한도
+PENDING_TTL  = 300         # pending URL 만료 시간 (초)
 
 # ── 쿠키 설정 ────────────────────────────────────────────────
-COOKIE_PATH = None
+COOKIE_PATH: str | None = None
 
 if os.getenv("RENDER"):
-    SECRET_PATH = "/etc/secrets/cookies.txt"
+    SECRET_PATH  = "/etc/secrets/cookies.txt"
     RUNTIME_PATH = "/tmp/cookies.txt"
     if os.path.exists(SECRET_PATH):
         shutil.copy(SECRET_PATH, RUNTIME_PATH)
@@ -57,8 +60,37 @@ def classify_url(url: str) -> str | None:
         return "vk"
     return None
 
-# ── 임시 URL 저장소 (chat_id → url) ──────────────────────────
-pending: dict[int, str] = {}
+# ── pending: {chat_id: (url, timestamp)} ─────────────────────
+pending: dict[int, tuple[str, float]] = {}
+
+def set_pending(chat_id: int, url: str):
+    pending[chat_id] = (url, time.monotonic())
+
+def pop_pending(chat_id: int) -> str | None:
+    entry = pending.pop(chat_id, None)
+    if not entry:
+        return None
+    url, ts = entry
+    if time.monotonic() - ts > PENDING_TTL:
+        return None   # 만료
+    return url
+
+# ── 유저별 다운로드 폴더 ─────────────────────────────────────
+def get_user_dir(chat_id: int) -> Path:
+    d = BASE_DOWNLOAD_DIR / str(chat_id)
+    d.mkdir(exist_ok=True)
+    return d
+
+def cleanup_dir(d: Path):
+    for f in d.iterdir():
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    try:
+        d.rmdir()
+    except Exception:
+        pass
 
 # ── /start ───────────────────────────────────────────────────
 @dp.message(CommandStart())
@@ -74,7 +106,7 @@ async def start(message: Message):
 # ── 링크 수신 ────────────────────────────────────────────────
 @dp.message()
 async def handle_link(message: Message):
-    url = message.text.strip()
+    url      = message.text.strip()
     platform = classify_url(url)
 
     if platform is None:
@@ -86,7 +118,7 @@ async def handle_link(message: Message):
         await download_and_send(message, url, mode="video")
 
     elif platform == "youtube":
-        pending[message.chat.id] = url
+        set_pending(message.chat.id, url)
 
         kb = InlineKeyboardBuilder()
         kb.button(text="🎬 MP4 (720p)", callback_data="yt_video")
@@ -98,59 +130,95 @@ async def handle_link(message: Message):
 # ── 유튜브 옵션 콜백 ─────────────────────────────────────────
 @dp.callback_query(F.data.startswith("yt_"))
 async def yt_callback(call: CallbackQuery):
-    url = pending.pop(call.message.chat.id, None)
+    url = pop_pending(call.message.chat.id)
     if not url:
-        await call.answer("링크가 만료됐습니다. 다시 보내주세요.", show_alert=True)
+        await call.answer(
+            "링크가 만료됐습니다. 다시 보내주세요.",
+            show_alert=True
+        )
         return
 
     mode = "mp3" if call.data == "yt_mp3" else "video"
     await call.message.edit_text("⏬ 다운로드 중...")
     await download_and_send(call.message, url, mode=mode)
 
-# ── 공통 다운로드 & 전송 함수 ────────────────────────────────
-async def download_and_send(message: Message, url: str, mode: str = "video"):
-    # 폴더 정리
-    for f in DOWNLOAD_DIR.iterdir():
-        try:
-            f.unlink()
-        except Exception:
-            pass
+# ── yt-dlp 동기 작업 (thread pool에서 실행) ──────────────────
+def _run_ydl(ydl_opts: dict, url: str) -> dict:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=True)
+
+# ── ffmpeg 비동기 실행 ────────────────────────────────────────
+async def _run_ffmpeg(input_path: Path, output_path: Path):
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-c", "copy",
+        "-map", "0",
+        "-movflags", "+faststart",
+        str(output_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError("ffmpeg 변환 실패")
+
+# ── 공통 다운로드 & 전송 ─────────────────────────────────────
+async def download_and_send(
+    message: Message,
+    url: str,
+    mode: str = "video",
+):
+    chat_id  = message.chat.id
+    user_dir = get_user_dir(chat_id)
 
     try:
         if mode == "mp3":
             ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
-                'noplaylist': True,
-                'quiet': True,
-                'cookiefile': COOKIE_PATH,
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
+                "format":     "bestaudio/best",
+                "outtmpl":    str(user_dir / "%(id)s.%(ext)s"),
+                "noplaylist": True,
+                "quiet":      True,
+                "cookiefile": COOKIE_PATH,
+                "postprocessors": [{
+                    "key":             "FFmpegExtractAudio",
+                    "preferredcodec":  "mp3",
+                    "preferredquality":"192",
                 }],
             }
         else:
             ydl_opts = {
-                'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-                'outtmpl': str(DOWNLOAD_DIR / '%(id)s.%(ext)s'),
-                'noplaylist': True,
-                'quiet': True,
-                'merge_output_format': 'mp4',
-                'cookiefile': COOKIE_PATH,
+                "format": (
+                    "bestvideo[height<=720][ext=mp4]"
+                    "+bestaudio[ext=m4a]"
+                    "/best[height<=720][ext=mp4]/best"
+                ),
+                "outtmpl":             str(user_dir / "%(id)s.%(ext)s"),
+                "noplaylist":          True,
+                "quiet":               True,
+                "merge_output_format": "mp4",
+                "cookiefile":          COOKIE_PATH,
             }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        # ── 비동기로 yt-dlp 실행 ─────────────────────────────
+        info = await asyncio.to_thread(_run_ydl, ydl_opts, url)
 
-        video_id = info.get('id')
-        title    = info.get('title', 'video')[:50]
+        video_id = info.get("id")
+        title    = info.get("title", "video")[:50]
 
-        # ── MP3 전송 ──────────────────────────────────────────
+        # ── MP3 전송 ─────────────────────────────────────────
         if mode == "mp3":
-            mp3_file = next(DOWNLOAD_DIR.glob(f"{video_id}*.mp3"), None)
+            mp3_file = next(user_dir.glob(f"{video_id}*.mp3"), None)
             if not mp3_file:
                 await message.answer("❌ MP3 변환 실패")
+                return
+
+            size_mb = mp3_file.stat().st_size / 1024 / 1024
+            if size_mb > MAX_FILE_MB:
+                await message.answer(
+                    f"❌ 파일이 너무 큽니다 ({size_mb:.1f}MB)\n"
+                    f"텔레그램 한도: {MAX_FILE_MB}MB"
+                )
                 return
 
             await message.answer_audio(
@@ -158,26 +226,28 @@ async def download_and_send(message: Message, url: str, mode: str = "video"):
                 title=title,
                 caption="🎵 다운로드 완료"
             )
-            mp3_file.unlink(missing_ok=True)
             return
 
-        # ── 영상 전송 ─────────────────────────────────────────
-        raw_file = DOWNLOAD_DIR / f"{video_id}.mp4"
+        # ── 영상 전송 ────────────────────────────────────────
+        raw_file = user_dir / f"{video_id}.mp4"
         if not raw_file.exists():
-            found = next(DOWNLOAD_DIR.glob(f"{video_id}.*"), None)
-            if not found:
+            raw_file = next(user_dir.glob(f"{video_id}.*"), None)
+            if not raw_file:
                 await message.answer("❌ 파일 생성 실패")
                 return
-            raw_file = found
 
-        # faststart 적용
-        final_file = DOWNLOAD_DIR / f"fs_{video_id}.mp4"
-        subprocess.run(
-            ['ffmpeg', '-y', '-i', str(raw_file),
-             '-c', 'copy', '-map', '0', '-movflags', '+faststart',
-             str(final_file)],
-            check=True, capture_output=True
-        )
+        # 파일 크기 체크
+        size_mb = raw_file.stat().st_size / 1024 / 1024
+        if size_mb > MAX_FILE_MB:
+            await message.answer(
+                f"❌ 파일이 너무 큽니다 ({size_mb:.1f}MB)\n"
+                f"텔레그램 한도: {MAX_FILE_MB}MB"
+            )
+            return
+
+        # faststart 비동기 변환
+        final_file = user_dir / f"fs_{video_id}.mp4"
+        await _run_ffmpeg(raw_file, final_file)
 
         await message.answer_video(
             FSInputFile(final_file),
@@ -185,11 +255,12 @@ async def download_and_send(message: Message, url: str, mode: str = "video"):
             supports_streaming=True,
         )
 
-        raw_file.unlink(missing_ok=True)
-        final_file.unlink(missing_ok=True)
-
     except Exception as e:
         await message.answer(f"❌ 오류: {str(e)}")
+
+    finally:
+        # 유저 폴더 항상 정리
+        cleanup_dir(user_dir)
 
 # ── 실행 ─────────────────────────────────────────────────────
 async def main():
