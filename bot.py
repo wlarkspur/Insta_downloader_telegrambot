@@ -179,6 +179,9 @@ async def download_and_send(
     user_dir = get_user_dir(chat_id)
 
     try:
+        # 플랫폼 감지
+        platform = classify_url(url)
+
         if mode == "mp3":
             ydl_opts = {
                 "format":     "bestaudio/best",
@@ -192,10 +195,27 @@ async def download_and_send(
                     "preferredquality":"192",
                 }],
             }
+
+        elif platform == "instagram":
+            ydl_opts = {
+                "format": "bestvideo+bestaudio/best",
+                "outtmpl":             str(user_dir / "%(id)s.%(ext)s"),
+                "noplaylist":          True,
+                "quiet":               True,
+                "merge_output_format": "mp4",
+                "cookiefile":          COOKIE_PATH,
+                "http_headers": {
+                    "User-Agent": (
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                        "Version/17.0 Mobile/15E148 Safari/604.1"
+                    ),
+                },
+            }
+
         else:
             ydl_opts = {
-                "format": "best",
-                "format_sort": ["res:720", "ext:mp4:m4a"],
+                "format": "bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best",
                 "outtmpl":             str(user_dir / "%(id)s.%(ext)s"),
                 "noplaylist":          True,
                 "quiet":               True,
